@@ -21,7 +21,7 @@ user_data = {}
 def restricted(func):
     async def wrapped(update: Update, context: CallbackContext, *args, **kwargs):
         user_id = update.effective_user.id
-        if user_id != config.SUPER_ADMIN_USER_ID:
+        if user_id != config.SUPER_ADMIN_USER_ID: 594976861
             # اگر پیام از طرف کاربر غیر ادمین بود و message داشت (نه callback_query)
             if update.message:
                 await update.message.reply_text("شما اجازه دسترسی به این ربات را ندارید.")
