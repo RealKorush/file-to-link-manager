@@ -1,8 +1,8 @@
 import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackContext, CallbackQueryHandler
-import config
-import liara_s3_utils
+import config # فرض بر این است که فایل config.py شما موجود و صحیح است
+import liara_s3_utils # فرض بر این است که فایل liara_s3_utils.py شما موجود و صحیح است
 
 # فعال کردن لاگ‌گیری
 logging.basicConfig(
@@ -10,8 +10,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# وضعیت‌های مکالمه (برای مدیریت انتخاب سرور و فایل)
-CHOOSING_SERVER, CHOOSING_ACTION, RENAMING_FILE = range(3)
+# وضعیت‌های مکالمه (برای مدیریت انتخاب سرور و فایل) - اگر از ConversationHandler استفاده می‌کنید
+# در این نسخه ساده شده، از user_data برای نگهداری وضعیت استفاده می‌کنیم
+CHOOSING_SERVER, CHOOSING_ACTION, RENAMING_FILE = range(3) # اینها برای ConversationHandler مناسب‌ترند
 # داده‌های کاربر برای نگهداری انتخاب‌ها
 user_data = {}
 
@@ -21,7 +22,12 @@ def restricted(func):
     async def wrapped(update: Update, context: CallbackContext, *args, **kwargs):
         user_id = update.effective_user.id
         if user_id != config.SUPER_ADMIN_USER_ID:
-            await update.message.reply_text("شما اجازه دسترسی به این ربات را ندارید.")
+            # اگر پیام از طرف کاربر غیر ادمین بود و message داشت (نه callback_query)
+            if update.message:
+                await update.message.reply_text("شما اجازه دسترسی به این ربات را ندارید.")
+            # اگر callback_query بود، با یک answer می‌توان به کاربر اطلاع داد (اختیاری)
+            elif update.callback_query:
+                await update.callback_query.answer("عدم دسترسی", show_alert=True)
             return
         return await func(update, context, *args, **kwargs)
     return wrapped
@@ -32,30 +38,37 @@ def restricted(func):
 async def start_command(update: Update, context: CallbackContext) -> None:
     """دستور /start برای نمایش سرورها"""
     user_id = update.effective_user.id
-    user_data[user_id] = {} # ریست کردن داده‌های کاربر
+    user_data[user_id] = {} # ریست کردن داده‌های کاربر هنگام شروع مجدد
 
     keyboard = []
-    for server_name in config.SERVERS.keys():
-        keyboard.append([InlineKeyboardButton(server_name.capitalize(), callback_data=f"server_{server_name}")])
+    for server_name_key in config.SERVERS.keys(): # استفاده از server_name_key برای وضوح
+        keyboard.append([InlineKeyboardButton(server_name_key.capitalize(), callback_data=f"server_{server_name_key}")])
     keyboard.append([InlineKeyboardButton("📊 آمار کلی سرورها", callback_data="stats_all_servers")])
 
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("لطفاً یک سرور را انتخاب کنید یا آمار کلی را مشاهده کنید:", reply_markup=reply_markup)
-    return CHOOSING_SERVER
+    await update.message.reply_text("سلام! لطفاً یک سرور را انتخاب کنید یا آمار کلی را مشاهده کنید:", reply_markup=reply_markup)
+    # return CHOOSING_SERVER # برای ConversationHandler
+
 
 async def show_server_files(update: Update, context: CallbackContext, server_name: str) -> None:
     """نمایش فایل‌های یک سرور و آمار آن"""
-    query = update.callback_query
-    if query: # اگر از دکمه inline آمده است
-        await query.answer()
-
+    query = update.callback_query # این می‌تواند None باشد اگر تابع از جای دیگری فراخوانی شود
     user_id = update.effective_user.id
+
+    if user_id not in user_data: # اطمینان از وجود user_data
+        user_data[user_id] = {}
+
     user_data[user_id]['current_server'] = server_name
     server_info = config.SERVERS.get(server_name)
 
+    # تعیین اینکه پیام باید ویرایش شود یا پیام جدید ارسال شود
+    reply_method = query.edit_message_text if query else context.bot.send_message
+    chat_id_to_reply = query.message.chat_id if query else update.message.chat_id
+
+
     if not server_info:
-        await (query.edit_message_text if query else update.message.reply_text)("سرور نامعتبر است.")
-        return CHOOSING_SERVER
+        await reply_method(text="سرور نامعتبر است." if query else "سرور نامعتبر است.", chat_id=chat_id_to_reply if not query else None)
+        return # بازگشت به منوی اصلی یا وضعیت قبلی لازم است
 
     s3_client = liara_s3_utils.get_s3_client(
         server_info["access_key"],
@@ -65,299 +78,348 @@ async def show_server_files(update: Update, context: CallbackContext, server_nam
     )
 
     if not s3_client:
-        await (query.edit_message_text if query else update.message.reply_text)("خطا در اتصال به سرور.")
-        return CHOOSING_SERVER
+        await reply_method(text="خطا در اتصال به سرور." if query else "خطا در اتصال به سرور.", chat_id=chat_id_to_reply if not query else None)
+        return
 
     # دریافت آمار سرور
     usage_stats = liara_s3_utils.get_bucket_usage(s3_client, server_info["bucket"], config.SERVER_CAPACITY_GB)
     stats_message = (
         f"📊 آمار سرور {server_name.capitalize()}:\n"
-        f"استفاده شده: {usage_stats['used_gb']} گیگابایت\n"
-        f"فضای خالی: {usage_stats['free_gb']} گیگابایت\n"
-        f"تعداد فایل‌ها: {usage_stats['file_count']}"
+        f"استفاده شده: {usage_stats['used_gb']} گیگابایت ({usage_stats['file_count']} فایل)\n"
+        f"فضای خالی: {usage_stats['free_gb']} گیگابایت (از {usage_stats['total_gb']} گیگابایت)"
     )
 
     files = liara_s3_utils.list_files(s3_client, server_info["bucket"])
-    user_data[user_id]['files'] = {file['name']: file for file in files} # ذخیره فایل‌ها برای دسترسی سریع
+    user_data[user_id]['files'] = {file_item['name']: file_item for file_item in files} # ذخیره فایل‌ها
 
     keyboard = []
+    skipped_files_count = 0
     if files:
-        for file in files:
-            # نمایش نام فایل و در پرانتز حجم آن به مگابایت
-            file_size_mb = round(file['size'] / (1024 * 1024), 2)
-            keyboard.append([InlineKeyboardButton(f"{file['name']} ({file_size_mb} MB)", callback_data=f"file_{file['name']}")])
-    else:
+        for file_item in files:
+            file_name_original = file_item['name']
+            file_size_mb = round(file_item['size'] / (1024 * 1024), 2)
+
+            # کوتاه کردن نام فایل برای نمایش در دکمه اگر خیلی طولانی است
+            display_file_name = file_name_original
+            if len(display_file_name) > 30: # مثال: حداکثر 30 کاراکتر برای نام در دکمه
+                 display_file_name = display_file_name[:27] + "..."
+
+            button_text = f"{display_file_name} ({file_size_mb} MB)"
+            full_callback_data = f"file_{file_name_original}" # استفاده از نام کامل و اصلی برای callback_data
+            callback_data_bytes = len(full_callback_data.encode('utf-8'))
+
+            logger.info(
+                f"دکمه برای فایل: '{file_name_original}', "
+                f"متن دکمه: '{button_text}', "
+                f"callback_data: '{full_callback_data}', "
+                f"طول callback_data (بایت): {callback_data_bytes}"
+            )
+
+            if callback_data_bytes > 64:
+                skipped_files_count += 1
+                logger.error(
+                    f"خطا: callback_data برای فایل '{file_name_original}' در سرور '{server_name}' بیش از حد طولانی است "
+                    f"({callback_data_bytes} بایت). این دکمه ایجاد نخواهد شد."
+                )
+                # ارسال پیام به ادمین در مورد فایل رد شده
+                # این پیام در چت با ربات ارسال می‌شود
+                await context.bot.send_message(
+                    chat_id=user_id, # ارسال به کاربر ادمین
+                    text=f"⚠️ فایل '{file_name_original}' در سرور '{server_name.capitalize()}' به دلیل نام بسیار طولانی (callback_data با بیش از 64 بایت) در لیست دکمه‌ها نمایش داده نشد."
+                )
+                continue # از ایجاد این دکمه صرف نظر کن
+
+            keyboard.append([InlineKeyboardButton(button_text, callback_data=full_callback_data)])
+    
+    if skipped_files_count > 0:
+        stats_message += f"\n\n⚠️ {skipped_files_count} فایل به دلیل نام طولانی در لیست دکمه‌ها نمایش داده نشدند (اطلاعات در پیام جداگانه)."
+
+
+    if not files and skipped_files_count == 0: # اگر هیچ فایلی نبود و هیچ فایلی هم skip نشده بود
         stats_message += "\n\nهیچ فایلی در این سرور یافت نشد."
+    elif not keyboard and skipped_files_count > 0: # اگر همه فایل‌ها skip شده بودند
+         stats_message += "\n\nهمه فایل‌های موجود به دلیل نام طولانی قابل نمایش در دکمه‌ها نبودند."
+
 
     keyboard.append([InlineKeyboardButton("بازگشت به لیست سرورها", callback_data="back_to_servers")])
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     message_text = f"{stats_message}\n\nفایل‌های سرور {server_name.capitalize()}:"
-    if query:
-        await query.edit_message_text(text=message_text, reply_markup=reply_markup)
-    else: # اگر مستقیم به این تابع آمده باشیم (مثلا بعد از تغییر نام)
-        await update.message.reply_text(text=message_text, reply_markup=reply_markup)
 
-    return CHOOSING_ACTION
+    if query:
+        try:
+            await query.edit_message_text(text=message_text, reply_markup=reply_markup)
+        except Exception as e:
+            logger.error(f"خطا در ویرایش پیام (show_server_files): {e}")
+            # اگر ویرایش ناموفق بود (مثلا پیام تغییر نکرده)، پیام جدید بفرست
+            await context.bot.send_message(chat_id=chat_id_to_reply, text=message_text, reply_markup=reply_markup)
+    else:
+        await context.bot.send_message(chat_id=chat_id_to_reply, text=message_text, reply_markup=reply_markup)
+
+    # return CHOOSING_ACTION # برای ConversationHandler
 
 
 async def handle_all_server_stats(update: Update, context: CallbackContext) -> None:
     """نمایش آمار همه سرورها"""
     query = update.callback_query
     await query.answer()
-    user_id = update.effective_user.id
 
     full_stats_message = "📊 آمار کلی سرورها:\n\n"
-    total_used_gb = 0
-    total_capacity_gb = 0
+    total_used_gb_all = 0
+    total_capacity_gb_all = 0
+    total_files_all = 0
 
-    for server_name, server_info in config.SERVERS.items():
+    for server_name_key, server_info_val in config.SERVERS.items():
         s3_client = liara_s3_utils.get_s3_client(
-            server_info["access_key"],
-            server_info["secret_key"],
-            server_info["endpoint_url"],
-            server_info.get("region_name")
+            server_info_val["access_key"],
+            server_info_val["secret_key"],
+            server_info_val["endpoint_url"],
+            server_info_val.get("region_name")
         )
         if s3_client:
-            usage = liara_s3_utils.get_bucket_usage(s3_client, server_info["bucket"], config.SERVER_CAPACITY_GB)
+            usage = liara_s3_utils.get_bucket_usage(s3_client, server_info_val["bucket"], config.SERVER_CAPACITY_GB)
             full_stats_message += (
-                f"🔸 سرور {server_name.capitalize()}:\n"
+                f"🔸 سرور {server_name_key.capitalize()}:\n"
                 f"   - استفاده شده: {usage['used_gb']} / {usage['total_gb']} گیگابایت\n"
                 f"   - تعداد فایل‌ها: {usage['file_count']}\n\n"
             )
-            total_used_gb += usage['used_gb']
-            total_capacity_gb += usage['total_gb']
+            total_used_gb_all += usage['used_gb']
+            total_capacity_gb_all += usage['total_gb']
+            total_files_all += usage['file_count']
         else:
-            full_stats_message += f"🔸 سرور {server_name.capitalize()}: خطا در اتصال\n\n"
+            full_stats_message += f"🔸 سرور {server_name_key.capitalize()}: خطا در اتصال یا دریافت آمار\n\n"
 
-    overall_free_gb = total_capacity_gb - total_used_gb
+    overall_free_gb_all = total_capacity_gb_all - total_used_gb_all
     full_stats_message += (
         f"جمع کل:\n"
-        f"   - کل فضای استفاده شده: {round(total_used_gb, 2)} گیگابایت\n"
-        f"   - کل ظرفیت: {round(total_capacity_gb, 2)} گیگابایت\n"
-        f"   - کل فضای خالی: {round(overall_free_gb, 2)} گیگابایت"
+        f"   - کل فضای استفاده شده: {round(total_used_gb_all, 2)} گیگابایت\n"
+        f"   - کل ظرفیت: {round(total_capacity_gb_all, 2)} گیگابایت\n"
+        f"   - کل فضای خالی: {round(overall_free_gb_all, 2)} گیگابایت\n"
+        f"   - کل تعداد فایل‌ها: {total_files_all}"
     )
 
     keyboard = [[InlineKeyboardButton("بازگشت به لیست سرورها", callback_data="back_to_servers")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await query.edit_message_text(text=full_stats_message, reply_markup=reply_markup)
-    return CHOOSING_SERVER
+    # return CHOOSING_SERVER # برای ConversationHandler
 
 
 async def button_callback_handler(update: Update, context: CallbackContext) -> None:
     """مدیریت دکمه‌های inline"""
     query = update.callback_query
-    await query.answer() # مهم: برای اینکه تلگرام بفهمد به کلیک پاسخ داده شده
+    await query.answer()
     user_id = update.effective_user.id
 
-    # اطمینان از وجود user_data[user_id]
-    if user_id not in user_data:
+    if user_id not in user_data: # اطمینان از وجود user_data
         user_data[user_id] = {}
 
     callback_data = query.data
+    logger.info(f"Callback received: {callback_data} from user {user_id}")
+
 
     if callback_data == "back_to_servers":
-        # استفاده از context.bot به جای update.message برای ارسال پیام جدید یا ویرایش
-        keyboard = []
+        keyboard_main = []
         for server_name_key in config.SERVERS.keys():
-            keyboard.append([InlineKeyboardButton(server_name_key.capitalize(), callback_data=f"server_{server_name_key}")])
-        keyboard.append([InlineKeyboardButton("📊 آمار کلی سرورها", callback_data="stats_all_servers")])
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text("لطفاً یک سرور را انتخاب کنید یا آمار کلی را مشاهده کنید:", reply_markup=reply_markup)
-        return CHOOSING_SERVER
+            keyboard_main.append([InlineKeyboardButton(server_name_key.capitalize(), callback_data=f"server_{server_name_key}")])
+        keyboard_main.append([InlineKeyboardButton("📊 آمار کلی سرورها", callback_data="stats_all_servers")])
+        reply_markup_main = InlineKeyboardMarkup(keyboard_main)
+        try:
+            await query.edit_message_text("لطفاً یک سرور را انتخاب کنید یا آمار کلی را مشاهده کنید:", reply_markup=reply_markup_main)
+        except Exception as e: # اگر ویرایش ممکن نبود (مثلا پیام خیلی قدیمی است یا محتوا یکسان است)
+            logger.warning(f"Failed to edit message for back_to_servers, sending new one: {e}")
+            await context.bot.send_message(chat_id=query.message.chat_id, text="لطفاً یک سرور را انتخاب کنید یا آمار کلی را مشاهده کنید:", reply_markup=reply_markup_main)
+
+        user_data[user_id].pop('current_server', None) # پاک کردن سرور فعلی
+        user_data[user_id].pop('selected_file', None) # پاک کردن فایل انتخابی
+        user_data[user_id].pop('file_to_rename', None) # پاک کردن فایل در حال تغییر نام
+        # return CHOOSING_SERVER
 
     elif callback_data.startswith("server_"):
-        server_name = callback_data.split("_")[1]
-        await show_server_files(update, context, server_name)
-        return CHOOSING_ACTION
+        server_name_selected = callback_data[len("server_"):]
+        await show_server_files(update, context, server_name_selected)
+        # return CHOOSING_ACTION
 
     elif callback_data == "stats_all_servers":
         await handle_all_server_stats(update, context)
-        return CHOOSING_SERVER
+        # return CHOOSING_SERVER
 
 
     elif callback_data.startswith("file_"):
-        file_key = callback_data[len("file_"):] # جدا کردن نام فایل از callback_data
-        user_data[user_id]['selected_file'] = file_key
-        server_name = user_data[user_id].get('current_server')
+        file_key_selected = callback_data[len("file_"):]
+        user_data[user_id]['selected_file'] = file_key_selected
+        current_server_name = user_data[user_id].get('current_server')
 
-        if not server_name:
-            await query.edit_message_text("خطا: سرور فعلی مشخص نیست. لطفاً از ابتدا شروع کنید.")
-            # اینجا باید کاربر را به مرحله انتخاب سرور برگردانید
-            # برای سادگی، فعلا فقط پیام خطا می‌دهیم
-            return CHOOSING_SERVER # یا یک وضعیت خطای دیگر
+        if not current_server_name:
+            await query.edit_message_text("خطا: سرور فعلی مشخص نیست. لطفاً با دستور /start مجددا شروع کنید.")
+            return
 
-        keyboard = [
-            [InlineKeyboardButton(f"🔗 دریافت لینک دانلود", callback_data=f"getlink_{file_key}")],
-            [InlineKeyboardButton(f"✏️ تغییر نام", callback_data=f"rename_{file_key}")],
-            [InlineKeyboardButton(f"🗑️ حذف فایل", callback_data=f"delete_{file_key}")],
-            [InlineKeyboardButton(f"بازگشت به لیست فایل‌ها ({server_name.capitalize()})", callback_data=f"server_{server_name}")]
+        # کوتاه کردن نام فایل برای نمایش در پیام
+        display_file_key = file_key_selected
+        if len(display_file_key) > 40:
+            display_file_key = display_file_key[:37] + "..."
+
+
+        keyboard_actions = [
+            [InlineKeyboardButton(f"🔗 لینک دانلود", callback_data=f"getlink_{file_key_selected}")],
+            [InlineKeyboardButton(f"✏️ تغییر نام", callback_data=f"rename_{file_key_selected}")],
+            [InlineKeyboardButton(f"🗑️ حذف", callback_data=f"delete_{file_key_selected}")],
+            [InlineKeyboardButton(f"بازگشت به فایل‌های سرور {current_server_name.capitalize()}", callback_data=f"server_{current_server_name}")]
         ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text(f"عملیات مورد نظر برای فایل '{file_key}' را انتخاب کنید:", reply_markup=reply_markup)
-        return CHOOSING_ACTION
+        reply_markup_actions = InlineKeyboardMarkup(keyboard_actions)
+        await query.edit_message_text(f"فایل: '{display_file_key}'\nسرور: {current_server_name.capitalize()}\n\nعملیات مورد نظر را انتخاب کنید:", reply_markup=reply_markup_actions)
+        # return CHOOSING_ACTION
 
 
     elif callback_data.startswith("delete_"):
-        file_key = callback_data[len("delete_"):]
-        server_name = user_data[user_id].get('current_server')
+        file_to_delete = callback_data[len("delete_"):]
         # تاییدیه حذف
-        keyboard = [
-            [InlineKeyboardButton(f"✅ بله، حذف کن", callback_data=f"confirmdelete_{file_key}")],
-            [InlineKeyboardButton(f"❌ انصراف", callback_data=f"file_{file_key}")] # بازگشت به گزینه‌های فایل
+        keyboard_confirm = [
+            [InlineKeyboardButton(f"✅ بله، حذف کن", callback_data=f"confirmdelete_{file_to_delete}")],
+            [InlineKeyboardButton(f"❌ انصراف", callback_data=f"file_{file_to_delete}")]
         ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text(f"آیا از حذف فایل '{file_key}' مطمئن هستید؟", reply_markup=reply_markup)
-        return CHOOSING_ACTION
+        reply_markup_confirm = InlineKeyboardMarkup(keyboard_confirm)
+        await query.edit_message_text(f"آیا از حذف فایل '{file_to_delete}' مطمئن هستید؟", reply_markup=reply_markup_confirm)
+        # return CHOOSING_ACTION
 
 
     elif callback_data.startswith("confirmdelete_"):
-        file_key = callback_data[len("confirmdelete_"):]
-        server_name = user_data[user_id].get('current_server')
-        server_info = config.SERVERS[server_name]
+        file_to_delete_confirmed = callback_data[len("confirmdelete_"):]
+        server_name_of_file = user_data[user_id].get('current_server')
+        server_info_of_file = config.SERVERS[server_name_of_file]
 
-        s3_client = liara_s3_utils.get_s3_client(
-            server_info["access_key"], server_info["secret_key"], server_info["endpoint_url"], server_info.get("region_name")
+        s3_client_del = liara_s3_utils.get_s3_client(
+            server_info_of_file["access_key"], server_info_of_file["secret_key"], server_info_of_file["endpoint_url"], server_info_of_file.get("region_name")
         )
-        if s3_client and liara_s3_utils.delete_file(s3_client, server_info["bucket"], file_key):
-            await query.edit_message_text(f"فایل '{file_key}' با موفقیت حذف شد.")
+        if s3_client_del and liara_s3_utils.delete_file(s3_client_del, server_info_of_file["bucket"], file_to_delete_confirmed):
+            await query.edit_message_text(f"فایل '{file_to_delete_confirmed}' با موفقیت حذف شد.")
         else:
-            await query.edit_message_text(f"خطا در حذف فایل '{file_key}'.")
-        # نمایش مجدد فایل‌های سرور
-        await show_server_files(update, context, server_name)
-        return CHOOSING_ACTION
+            await query.edit_message_text(f"خطا در حذف فایل '{file_to_delete_confirmed}'.")
+
+        await show_server_files(update, context, server_name_of_file) # نمایش مجدد فایل‌ها
+        # return CHOOSING_ACTION
 
 
     elif callback_data.startswith("getlink_"):
-        file_key = callback_data[len("getlink_"):]
-        server_name = user_data[user_id].get('current_server')
-        server_info = config.SERVERS[server_name]
-        s3_client = liara_s3_utils.get_s3_client(
-            server_info["access_key"], server_info["secret_key"], server_info["endpoint_url"], server_info.get("region_name")
+        file_to_link = callback_data[len("getlink_"):]
+        server_name_for_link = user_data[user_id].get('current_server')
+        server_info_for_link = config.SERVERS[server_name_for_link]
+        s3_client_link = liara_s3_utils.get_s3_client(
+            server_info_for_link["access_key"], server_info_for_link["secret_key"], server_info_for_link["endpoint_url"], server_info_for_link.get("region_name")
         )
-        if s3_client:
-            link = liara_s3_utils.get_download_link(s3_client, server_info["bucket"], file_key)
+        if s3_client_link:
+            link = liara_s3_utils.get_download_link(s3_client_link, server_info_for_link["bucket"], file_to_link)
             if link:
-                # برای جلوگیری از مشکلات Markdown در لینک، از parse_mode=None استفاده می‌کنیم
-                # یا لینک را در تگ <pre> قرار می‌دهیم
-                await query.message.reply_text(f"لینک دانلود برای '{file_key}':\n`{link}`", parse_mode='MarkdownV2') # یا HTML
-                # بازگشت به گزینه‌های فایل بعد از ارسال لینک
-                # await query.answer() # برای اینکه پیام "loading" دکمه از بین برود
-                # current_text = query.message.text
-                # await query.edit_message_text(text=current_text) # متن قبلی را حفظ میکنیم
+                # پیام قبلی را ویرایش نمی‌کنیم، لینک را در پیام جدید می‌فرستیم
+                await query.message.reply_text(f"لینک دانلود برای '{file_to_link}':\n`{link}`", parse_mode='MarkdownV2')
+                # await query.answer("لینک دانلود ارسال شد.") # یک نوتیفیکیشن کوچک به کاربر
             else:
                 await query.edit_message_text("خطا در ایجاد لینک دانلود.")
         else:
             await query.edit_message_text("خطا در اتصال به سرور برای دریافت لینک.")
-        # کاربر همچنان در مرحله انتخاب عملیات برای فایل است
-        return CHOOSING_ACTION
+        # کاربر همچنان در مرحله انتخاب عملیات برای فایل است، پس صفحه کلید قبلی را دست نمی‌زنیم
+        # مگر اینکه بخواهیم به لیست فایل‌ها برگردیم. در اینجا، کاربر باید خودش بازگشت را بزند.
+        # return CHOOSING_ACTION
 
 
     elif callback_data.startswith("rename_"):
-        file_key = callback_data[len("rename_"):]
-        user_data[user_id]['file_to_rename'] = file_key
-        await query.edit_message_text(f"لطفاً نام جدید را برای فایل '{file_key}' ارسال کنید:")
-        return RENAMING_FILE
+        file_to_rename_original = callback_data[len("rename_"):]
+        user_data[user_id]['file_to_rename'] = file_to_rename_original # ذخیره نام فایل اصلی
+        user_data[user_id]['renaming_in_progress'] = True # یک فلگ برای handle_rename_message
+        await query.edit_message_text(f"نام فعلی: '{file_to_rename_original}'.\nلطفاً نام جدید را ارسال کنید:")
+        # return RENAMING_FILE
 
-    # اگر callback_data شناخته نشد (نباید اتفاق بیفتد)
-    # await query.edit_message_text("دستور نامشخص.")
-    # return CHOOSING_SERVER # یا هر وضعیت پیش‌فرض دیگر
+    # ... سایر بخش‌های button_callback_handler
 
 
 @restricted
-async def handle_rename_message(update: Update, context: CallbackContext) -> int:
-    """دریافت نام جدید فایل و انجام تغییر نام"""
+async def handle_rename_message(update: Update, context: CallbackContext) -> None:
+    """دریافت نام جدید فایل و انجام تغییر نام (فقط اگر renaming_in_progress ست شده باشد)"""
     user_id = update.effective_user.id
+
+    # بررسی اینکه آیا واقعا در فرآیند تغییر نام هستیم
+    if not user_data.get(user_id, {}).get('renaming_in_progress', False):
+        # اگر کاربر متنی فرستاد و انتظار تغییر نام نداشتیم، آن را نادیده می‌گیریم
+        # یا یک پیام راهنما ارسال می‌کنیم که از /start استفاده کند
+        # logger.info(f"Received unexpected text from user {user_id} while not in renaming state: {update.message.text}")
+        return
+
     new_file_key = update.message.text.strip()
     old_file_key = user_data[user_id].get('file_to_rename')
-    server_name = user_data[user_id].get('current_server')
+    current_server_name_for_rename = user_data[user_id].get('current_server')
 
-    if not old_file_key or not server_name:
-        await update.message.reply_text("خطا: اطلاعات لازم برای تغییر نام موجود نیست. لطفاً دوباره تلاش کنید.")
-        await start_command(update, context) # بازگشت به شروع
-        return CHOOSING_SERVER
+    # پاک کردن فلگ تغییر نام در هر صورت
+    user_data[user_id].pop('renaming_in_progress', None)
+
+
+    if not old_file_key or not current_server_name_for_rename:
+        await update.message.reply_text("خطا: اطلاعات لازم برای تغییر نام موجود نیست. لطفاً دوباره از لیست فایل‌ها اقدام کنید.")
+        # await start_command(update, context) # یا بازگشت به لیست سرورها
+        return
 
     if not new_file_key:
-        await update.message.reply_text("نام فایل نمی‌تواند خالی باشد. لطفاً نام جدید را ارسال کنید:")
-        return RENAMING_FILE # باقی ماندن در وضعیت تغییر نام
+        await update.message.reply_text("نام فایل نمی‌تواند خالی باشد. لطفاً نام جدید را ارسال کنید یا برای لغو، عملیات دیگری انتخاب کنید.")
+        # بازگرداندن کاربر به منوی عملیات فایل قبلی
+        # این بخش نیاز به بازسازی دکمه‌های قبلی دارد
+        user_data[user_id]['renaming_in_progress'] = True # دوباره فلگ را ست می‌کنیم تا بتواند دوباره تلاش کند
+        await update.message.reply_text(f"نام فعلی: '{old_file_key}'.\nلطفاً نام جدید را ارسال کنید (یا برای لغو، از دکمه بازگشت قبلی استفاده کنید اگر هنوز موجود است):")
 
-    # بررسی کاراکترهای غیرمجاز (بسته به محدودیت‌های S3/Liara)
-    if "/" in new_file_key: # S3 از / برای شبیه‌سازی پوشه استفاده می‌کند
-        await update.message.reply_text("نام فایل نمی‌تواند شامل '/' باشد. لطفاً نام دیگری انتخاب کنید:")
-        return RENAMING_FILE
+        return
 
-    server_info = config.SERVERS[server_name]
-    s3_client = liara_s3_utils.get_s3_client(
-        server_info["access_key"], server_info["secret_key"], server_info["endpoint_url"], server_info.get("region_name")
+    if "/" in new_file_key or "\\" in new_file_key:
+        await update.message.reply_text("نام فایل نمی‌تواند شامل '/' یا '\\' باشد. لطفاً نام دیگری انتخاب کنید:")
+        user_data[user_id]['renaming_in_progress'] = True # دوباره فلگ را ست می‌کنیم
+        await update.message.reply_text(f"نام فعلی: '{old_file_key}'.\nلطفاً نام جدید را ارسال کنید:")
+        return
+
+    server_info_rename = config.SERVERS[current_server_name_for_rename]
+    s3_client_rename = liara_s3_utils.get_s3_client(
+        server_info_rename["access_key"], server_info_rename["secret_key"], server_info_rename["endpoint_url"], server_info_rename.get("region_name")
     )
 
-    if s3_client:
-        if liara_s3_utils.rename_file(s3_client, server_info["bucket"], old_file_key, new_file_key):
+    if s3_client_rename:
+        if liara_s3_utils.rename_file(s3_client_rename, server_info_rename["bucket"], old_file_key, new_file_key):
             await update.message.reply_text(f"نام فایل '{old_file_key}' با موفقیت به '{new_file_key}' تغییر یافت.")
-            del user_data[user_id]['file_to_rename'] # پاک کردن فایل در حال تغییر نام
+            user_data[user_id].pop('file_to_rename', None)
             # نمایش مجدد فایل‌های سرور با نام جدید
-            # اینجا چون پیام جدید ارسال می‌شود، باید show_server_files را با update (و نه query) فراخوانی کنیم
-            # اما show_server_files انتظار query دارد. باید آن را اصلاح کنیم یا یک wrapper بسازیم.
-            # برای سادگی، کاربر را به لیست فایل‌ها برمی‌گردانیم.
-            await show_server_files(update, context, server_name) # نیاز به اصلاح show_server_files دارد
-            return CHOOSING_ACTION
+            # چون show_server_files انتظار query دارد و اینجا نداریم، باید آن را تطبیق دهیم
+            # یا یک wrapper بسازیم. برای سادگی، پیام می‌دهیم و از کاربر می‌خواهیم بازگردد.
+            # await show_server_files(update, context, current_server_name_for_rename) # این کار نخواهد کرد چون update اینجا Message است
+            # یک راه حل ساده:
+            await context.bot.send_message(chat_id=user_id, text=f"لیست فایل‌های سرور {current_server_name_for_rename.capitalize()} به‌روز شد. برای مشاهده، لطفاً سرور را مجدداً انتخاب کنید یا از دکمه بازگشت استفاده نمایید.")
+            # ایده بهتر: show_server_files را طوری بازنویسی کنیم که هم با query و هم بدون آن کار کند
+            # یا یک پیام با دکمه "نمایش مجدد فایل‌ها" بفرستیم.
+            # فعلا، کاربر باید دستی به لیست فایل‌ها برگردد یا از /start استفاده کند.
+
         else:
             await update.message.reply_text(f"خطا در تغییر نام فایل '{old_file_key}'. ممکن است نام جدید تکراری باشد یا خطایی رخ داده باشد.")
-            # بازگشت به گزینه‌های فایل اصلی
-            file_key = old_file_key # برای نمایش دکمه‌های فایل قبلی
-            keyboard = [
-                [InlineKeyboardButton(f"🔗 دریافت لینک دانلود", callback_data=f"getlink_{file_key}")],
-                [InlineKeyboardButton(f"✏️ تغییر نام", callback_data=f"rename_{file_key}")],
-                [InlineKeyboardButton(f"🗑️ حذف فایل", callback_data=f"delete_{file_key}")],
-                [InlineKeyboardButton(f"بازگشت به لیست فایل‌ها ({server_name.capitalize()})", callback_data=f"server_{server_name}")]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            await update.message.reply_text(f"عملیات مورد نظر برای فایل '{file_key}' را انتخاب کنید:", reply_markup=reply_markup)
-            return CHOOSING_ACTION
+            # بازگرداندن کاربر به منوی قبلی (عملیات روی فایل)
+            # این بخش هم نیاز به بازسازی دکمه‌های آن مرحله دارد
+            await context.bot.send_message(chat_id=user_id, text="لطفاً برای ادامه، فایل مورد نظر را مجددا از لیست انتخاب کنید.")
+
     else:
         await update.message.reply_text("خطا در اتصال به سرور برای تغییر نام.")
-        await start_command(update, context) # بازگشت به شروع
-        return CHOOSING_SERVER
+        # await start_command(update, context)
+    # return CHOOSING_ACTION (بستگی به طراحی ConversationHandler دارد)
 
 
-# --- تابع اصلی ---
 def main() -> None:
     """ربات را راه‌اندازی می‌کند."""
     application = Application.builder().token(config.BOT_TOKEN).build()
 
-    # افزودن CommandHandler برای دستور /start
-    application.add_handler(CommandHandler("start", start_command))
+    # استفاده از ConversationHandler برای مدیریت بهتر وضعیت‌ها توصیه می‌شود.
+    # در این نسخه ساده‌شده، از CallbackQueryHandler و MessageHandler به صورت جداگانه استفاده می‌کنیم.
 
-    # افزودن CallbackQueryHandler برای دکمه‌های inline
-    # اینجا باید مشخص کنیم که این هندلر در چه وضعیتی از مکالمه فعال باشد
-    # یا اینکه یک هندلر کلی برای همه callback ها داشته باشیم و داخل آن وضعیت را چک کنیم
+    application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CallbackQueryHandler(button_callback_handler))
 
-
-    # افزودن MessageHandler برای دریافت نام جدید فایل (وقتی در وضعیت RENAMING_FILE هستیم)
-    # این بخش نیاز به استفاده از ConversationHandler دارد برای مدیریت بهتر وضعیت‌ها
-    # برای سادگی فعلی، یک MessageHandler ساده اضافه می‌کنیم که فقط وقتی file_to_rename ست شده عمل کند
-    # راه حل بهتر استفاده از ConversationHandler است.
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Chat(config.SUPER_ADMIN_USER_ID), handle_rename_message_wrapper))
+    # این MessageHandler برای دریافت نام جدید فایل است.
+    # مهم: این هندلر باید فقط زمانی فعال شود که کاربر در وضعیت تغییر نام است.
+    # فیلتر Chat(config.SUPER_ADMIN_USER_ID) تضمین می‌کند که فقط ادمین می‌تواند این پیام‌ها را بفرستد.
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.User(config.SUPER_ADMIN_USER_ID), handle_rename_message))
 
 
-    # اجرای ربات تا زمانی که کاربر Ctrl-C را فشار دهد
     logger.info("ربات در حال اجراست...")
     application.run_polling()
-
-async def handle_rename_message_wrapper(update: Update, context: CallbackContext):
-    """
-    یک wrapper برای handle_rename_message تا بتوانیم وضعیت را قبل از فراخوانی چک کنیم.
-    این یک راه حل ساده است. ConversationHandler برای این موارد بسیار بهتر است.
-    """
-    user_id = update.effective_user.id
-    if user_data.get(user_id, {}).get('file_to_rename'): # فقط اگر در حال تغییر نام هستیم
-        await handle_rename_message(update, context)
-    else:
-        # اگر کاربر متنی ارسال کرد و در وضعیت تغییر نام نبود، می‌توانیم آن را نادیده بگیریم
-        # یا یک پیام راهنما ارسال کنیم.
-        # await update.message.reply_text("لطفاً ابتدا یک دستور را انتخاب کنید یا از /start استفاده کنید.")
-        pass # فعلا نادیده می‌گیریم
 
 
 if __name__ == "__main__":
