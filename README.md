@@ -35,3 +35,27 @@ A production-ready Telegram Bot built with Python to manage multiple S3-Compatib
    git clone [https://github.com/RealKorush/file-to-link-manager.git](https://github.com/RealKorush/file-to-link-manager.git)
    cd file-to-link-manager
 
+2. **Install requirements:**
+   ```bash
+   pip install -r requirements.txt
+
+3. **Configure Environment Variables:**
+   ```bash
+   cp .env.example .env
+4. **Run the Bot:**
+   ```bash
+   python main.py
+   
+   Environment Variables Configuration
+Variable,Description,Example
+BOT_TOKEN,Your Telegram Bot Token from BotFather,7676098241:AAGtvc...
+SUPER_ADMIN_USER_ID,Your numeric Telegram User ID,594976861
+SERVER_CAPACITY_GB,Storage limit allocated per bucket,2.5
+SERVER1_ACCESS_KEY,Access Key of your first S3 Bucket,it9dlgvf7rriu0s1
+SERVER1_SECRET_KEY,Secret Key of your first S3 Bucket,04a97537-01a9-458e...
+SERVER1_BUCKET,Name of your first S3 bucket,my-bucket-1
+SERVER1_ENDPOINT,Endpoint URL of your S3 provider,https://storage.c2.liara.space
+
+
+
+
