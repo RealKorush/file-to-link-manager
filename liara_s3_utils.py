@@ -1,12 +1,12 @@
+import logging
 import boto3
 from botocore.client import Config
 from botocore.exceptions import NoCredentialsError, PartialCredentialsError, ClientError
-import logging
 
 logger = logging.getLogger(__name__)
 
 def get_s3_client(access_key, secret_key, endpoint_url, region_name=None):
-    """ایجاد یک کلاینت S3 برای اتصال به لیارا"""
+    """ایجاد یک کلاینت S3 برای اتصال به لیارا یا هر سرویس S3 compatible"""
     try:
         s3_client = boto3.client(
             's3',
@@ -14,10 +14,8 @@ def get_s3_client(access_key, secret_key, endpoint_url, region_name=None):
             aws_secret_access_key=secret_key,
             endpoint_url=endpoint_url,
             config=Config(signature_version='s3v4'),
-            region_name=region_name if region_name else None # برخی سرویس‌ها به region نیاز ندارند
+            region_name=region_name if region_name else None
         )
-        # برای اطمینان از اتصال، یک درخواست ساده انجام دهید (اختیاری)
-        # s3_client.list_buckets() # این ممکن است برای endpoint های خاص باکت مجاز نباشد
         return s3_client
     except (NoCredentialsError, PartialCredentialsError) as e:
         logger.error(f"خطا در اطلاعات ورود به S3: {e}")
@@ -34,7 +32,7 @@ def list_files(s3_client, bucket_name):
         files = []
         if 'Contents' in response:
             for item in response['Contents']:
-                files.append({'name': item['Key'], 'size': item['Size']}) # نام و حجم فایل
+                files.append({'name': item['Key'], 'size': item['Size']})
         return files
     except ClientError as e:
         logger.error(f"خطا در لیست کردن فایل‌ها از باکت {bucket_name}: {e}")
@@ -53,17 +51,13 @@ def delete_file(s3_client, bucket_name, file_key):
 def rename_file(s3_client, bucket_name, old_file_key, new_file_key):
     """تغییر نام یک فایل (کپی و حذف)"""
     try:
-        # کپی کردن آبجکت با نام جدید
         copy_source = {'Bucket': bucket_name, 'Key': old_file_key}
         s3_client.copy_object(CopySource=copy_source, Bucket=bucket_name, Key=new_file_key)
-        logger.info(f"فایل {old_file_key} به {new_file_key} در باکت {bucket_name} کپی شد.")
-
-        # حذف آبجکت قدیمی
         s3_client.delete_object(Bucket=bucket_name, Key=old_file_key)
-        logger.info(f"فایل قدیمی {old_file_key} از باکت {bucket_name} حذف شد.")
+        logger.info(f"فایل {old_file_key} با موفقیت به {new_file_key} تغییر نام یافت.")
         return True
     except ClientError as e:
-        logger.error(f"خطا در تغییر نام فایل {old_file_key} به {new_file_key} در باکت {bucket_name}: {e}")
+        logger.error(f"خطا در تغییر نام فایل {old_file_key} به {new_file_key}: {e}")
         return False
 
 def get_download_link(s3_client, bucket_name, file_key, expiration=3600):
@@ -72,11 +66,11 @@ def get_download_link(s3_client, bucket_name, file_key, expiration=3600):
         response = s3_client.generate_presigned_url(
             'get_object',
             Params={'Bucket': bucket_name, 'Key': file_key},
-            ExpiresIn=expiration  # لینک برای یک ساعت معتبر است
+            ExpiresIn=expiration
         )
         return response
     except ClientError as e:
-        logger.error(f"خطا در ایجاد لینک دانلود برای {file_key} از باکت {bucket_name}: {e}")
+        logger.error(f"خطا در ایجاد لینک دانلود برای {file_key}: {e}")
         return None
 
 def get_bucket_usage(s3_client, bucket_name, server_capacity_gb):
