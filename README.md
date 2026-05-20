@@ -32,5 +32,6 @@ A production-ready Telegram Bot built with Python to manage multiple S3-Compatib
 
 1. **Clone the repository:**
    ```bash
-   git clone [https://github.com/YOUR_USERNAME/file-to-link-manager.git](https://github.com/YOUR_USERNAME/file-to-link-manager.git)
+   git clone [https://github.com/RealKorush/file-to-link-manager.git](https://github.com/RealKorush/file-to-link-manager.git)
    cd file-to-link-manager
+
